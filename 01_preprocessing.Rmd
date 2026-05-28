@@ -1,0 +1,480 @@
+---
+title: "Regional Influenza Outbreak Severity Prediction for Healthcare Planning"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r warning=FALSE, message=FALSE}
+# Load required libraries
+library(tidyverse)  #For data manipulation
+library(GGally) #visualization
+library(janitor) #data manipulation
+library(lubridate) #For date handling
+library(corrplot) #visualization
+library(ggplot2) #visualization
+library(scales) ##formatting
+library(knitr) #formatting 
+library(gridExtra) #display plots in grid layout
+library(patchwork) #combine multiple ggplot
+library(zoo) #imputation and interpolation
+```
+
+**The ILINet and Clinical Labs datasets were downloaded from the CDC FluView surveillance system, which provides weekly influenza monitoring data across the United States. The ILINet dataset contains information about influenza-like illness (ILI) activity reported by healthcare providers, including the percentage of flu-like patient visits, total ILI cases, number of providers, and total patient visits.**
+
+**The Clinical Labs dataset contains laboratory-confirmed influenza testing results, including total specimens tested, confirmed Influenza A and B cases, and positivity percentages. Combining these two datasets helps create a more complete influenza surveillance system by connecting symptom-based flu activity with confirmed laboratory influenza cases for outbreak analysis and prediction.**
+
+### IMPORT DATASETS
+
+```{r}
+# CDC datasets contain an extra descriptive row,
+# therefore we use skip = 1  during import.
+#Reading all columns as character strings to prevent formatting issues
+# Import ILINet dataset
+ilinet <- read_csv(
+  "C:/Users/shesh/OneDrive/Desktop/503PROJECT/FluViewPhase2Data/ILINet.csv",skip = 1,
+  col_types = cols(.default = col_character()))
+
+# Import ICl Clinical labs dataset
+clinical_labs <- read_csv(
+  "C:/Users/shesh/OneDrive/Desktop/503PROJECT/FluViewPhase2Data/ICL_NREVSS_Clinical_Labs.csv",
+  skip = 1,col_types = cols(.default = col_character()))
+
+```
+
+### VERIFY IMPORTS
+```{r}
+#view few rows and columns of ilinet dataset
+head(ilinet[,1:7]) |> knitr::kable()
+#view few rows for clinical lab dataset
+head(clinical_labs) |>knitr::kable()
+
+#view dimensions of both datasets
+cat("Dimensions for ilinet dataset is ", dim(ilinet))
+cat("\n Dimensions for clinical labs dataset is",dim(clinical_labs))
+```
+Output show 30152 rows, 15 columns for ilinet and 30152 rows and 10 columns and 29808 rows for clinical _labs.
+
+### VIEW DATATYPES
+
+```{r}
+# inspect structure of both datasets
+str(ilinet) 
+str(clinical_labs) 
+```
+From above output we can see all variables are currently stored as character strings which will require numeric conversion for analysis. 
+In CDC influenza datasets, "X" usually means the value was suppressed, missing, or not reported.
+
+### CLEAN COLUMN NAMES
+
+Original column names contain capital letters,spaces,special characters,and periods.So we Standardize names to improves code readability,
+
+```{r}
+# View column names for ilinet
+colnames(ilinet) |>knitr::kable()
+#View column names fr Clinical lab dataset
+colnames(clinical_labs) |>knitr::kable()
+
+#To improve code readability and prevents errors we standardize column names to a consistent format
+#Convert column names into standardized format
+ilinet <- clean_names(ilinet)
+#Verify cleaned column names
+colnames(ilinet) |>knitr::kable()
+#similarly for cilinal labs dataset
+clinical_labs <- clean_names(clinical_labs)
+#Verify cleaned column names
+colnames(clinical_labs) |>knitr::kable()
+
+```
+### VIEW DUPLICATES
+```{r}
+#calculate duplicate for ilinet
+duplicate_ili <- sum(duplicated(ilinet))
+duplicate_ili
+#calculate duplicate for clinical labs
+duplicate_clinical <- sum(duplicated(clinical_labs))
+duplicate_clinical
+```
+No duplicate records exist in either datasets.
+
+### HANDLE SUPPRESSED VALUES X
+
+```{r}
+#"X" usually means the value was suppressed, missing, or not reported.
+#R cannot  analyze "X" as numeric data.
+#Converts CDC suppression values "X" to proper NA values
+ilinet[ilinet == "X"] <- NA
+clinical_labs[clinical_labs == "X"] <- NA
+
+#counts missing data per column
+missing_ilinet <- colSums(is.na(ilinet))
+missing_ilinet |>knitr::kable()
+missing_clinical <- colSums(is.na(clinical_labs))
+missing_clinical |>knitr::kable()
+```
+- The missing value analysis shows that percent_weighted_ili contains 30,141 missing values, meaning almost all records in this variable are unavailable and the column may not be reliable for analysis.
+- All age-specific variables (age_0_4, age_25_49, age_25_64, age_5_24, age_50_64, and age_65) contain 100% missing values making these variables completely unusable.
+- The Clinical Labs dataset contains 6,205 missing values.
+- Since the age-group variables contain no valid observations, these columns should be removed during preprocessing to reduce noise and improve overall data quality for influenza outbreak analysis.
+
+### MISSING VALUES
+
+We can calculate and visualise the missing value using ggplot for both datasets.
+
+```{r}
+# This converts the missing value counts into a dataframe
+missing_df_ili <- data.frame(variable = names(missing_ilinet),missing_count = missing_ilinet)
+## The bar chart helps identify missingness in the ILINet.
+p1 <- ggplot(
+  missing_df_ili,
+  aes(x = reorder(variable, missing_count),y = missing_count)) +
+  geom_bar(stat = "identity",fill = "steelblue" ) + coord_flip() +
+  labs(title = "Missing Value Count in ILINet Dataset",x = "Variables",y = "Missing Count")
+
+#Similarly convert missing values into dataframe for clinical labs dataset
+missing_df_clinical <- data.frame( variable= names(missing_clinical),missing_count =missing_clinical)
+#visualise using barplot
+p2 <- ggplot(missing_df_clinical,
+  aes(x = reorder(variable, missing_count),y = missing_count)) +
+  geom_bar(stat = "identity",fill = "darkgreen") +coord_flip() +
+  labs(title = "Missing Values in Clinical Labs",x = "Variables",y = "Missing Count") 
+
+#visualize both plots
+p1 + p2
+```
+
+### DROP COMPLETELY MISSING COLUMNS
+
+
+```{r}
+#Columns with entirely missing values are removed
+# Age columns and weighted_ili have 100% missing values so we drop them 
+ilinet <- ilinet %>% 
+  select(-starts_with("age_"), -percent_weighted_ili , -region_type) 
+#similarly drop for clinical labs dataset
+clinical_labs <- clinical_labs %>% select(-region_type )
+
+# Verify columns removed
+colnames(ilinet) |> knitr::kable()
+colnames(clinical_labs) |> knitr::kable()
+```
+After dropping  columns, the ILINet dataset is reduced from 15 to 7 meaningful variables.
+
+
+### CONVERT VARIABLES TO NUMERIC
+
+Convert date components, ILI percentages, and count variables to proper numeric types.
+
+```{r}
+#convert numeric variables from character datatype into integer/numeric format.
+ilinet <- ilinet %>%
+  mutate(
+    year = as.integer(year),
+    week = as.integer(week),
+    percent_unweighted_ili = as.numeric(percent_unweighted_ili),
+    ilitotal = as.numeric(ilitotal),
+    num_of_providers = as.numeric(num_of_providers),
+    total_patients = as.numeric(total_patients))
+    
+#similarly for clinical_labs
+clinical_labs <- clinical_labs %>%
+  mutate(
+    year = as.integer(year),
+    week = as.integer(week),
+    total_specimens = as.numeric(total_specimens),
+    total_a = as.numeric(total_a),
+    total_b = as.numeric(total_b),
+    percent_positive = as.numeric(percent_positive),
+    percent_a = as.numeric(percent_a),
+    percent_b = as.numeric(percent_b)
+  )
+#Verify datatype
+sapply(ilinet, class) |>knitr::kable() 
+sapply(clinical_labs, class) |>knitr::kable()
+```
+
+After conversion, approximately 7 variables in ILINet and 8 in clinical labs become numeric.
+
+
+### **NUMERIC VARIABLE DISTRIBUTIONS**
+
+#### **ILINET DATASET**
+
+- Distribution of numeric variable for ilinet dataset
+
+```{r, warning=FALSE}
+
+# Create distribution plots for key numeric variables only
+#select numeric variables for ilinet dataset
+numeric_ilinet <- ilinet %>% select(where(is.numeric),-week,-year)
+
+#Convet all numeric columns into one common structure(long format) so ggplot create multiple panels
+numeric_ilinet_long <- numeric_ilinet %>%
+  pivot_longer(cols = everything(),names_to = "Variable",values_to = "Value")
+
+#Create histogram distributions for all numeric variables
+ggplot(numeric_ilinet_long,aes(x = Value)) +
+  
+  geom_histogram(bins = 30,fill ="steelblue",color= "white",alpha = 0.9) +
+  
+  facet_wrap(~ Variable,scales = "free",ncol = 2) +   #creates separate plots for each variable
+  
+  labs(title = "Distribution of Numeric Variables for ILINet",
+    x = "Value",y = "Count") + theme_minimal()
+  
+```
+- Most numeric variables are right-skewed.Variables such as ilitotal, total_patients, total_specimens, total_a, and total_b show strong positive skewness.
+- percent_unweighted_ili is also positively skewed, indicating that high influenza activity occurs less frequently.
+- This pattern is expected because most regions experience normal flu activity, while only a few weeks show major outbreak spikes.
+- week and year appear more uniformly distributed.
+
+#### **CLINICAL LABS DATASET**
+
+- Distribution of numeric variables for Clinical dataset
+
+```{r,warning=FALSE}
+
+# Create distribution plot for clinical dataset
+#select numeric variables for clinical labs dataset
+numeric_clinical <- clinical_labs %>% select(where(is.numeric), -week, -year)
+
+#Convert all numeric columns into one common structure
+numeric_clinical_long <- numeric_clinical %>%
+  pivot_longer(cols = everything(),names_to = "Variable",values_to = "Value")
+
+#Create histogram distributions for all numeric variables
+ggplot(numeric_clinical_long,aes(x = Value)) +
+  geom_histogram(bins = 30,fill = "steelblue",color = "white",alpha = 0.9) +
+  
+  facet_wrap(~ Variable,scales = "free",ncol = 3) +   #creates separate plots for each variable
+  
+  labs(title = "Distribution for Clinical Labs",
+    x = "Value",y = "Count") + theme_minimal()
+  
+```
+- The Clinical Labs numeric variables are highly right-skewed.Variables such as total_specimens, total_a, and total_b show many low laboratory counts with a small number of very large testing volumes.
+- percent_positive, percent_a, and percent_b are also positively skewed, indicating that high influenza positivity rates occur less frequently.
+
+
+### OUTLIER DETECTION 
+
+```{r}
+
+# detect outliers using IQR method
+ili_vars <- names(numeric_ilinet)
+clinical_vars <- names(numeric_clinical)
+detect_outliers_iqr <- function(data, var_name) {
+  x <- data[[var_name]]
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  outliers <- which(x < lower_bound | x > upper_bound)
+  
+  data.frame(
+    Variable = var_name,
+    Q1 = Q1,
+    Q3 = Q3,
+    IQR = IQR,
+    Lower_Bound = lower_bound,
+    Upper_Bound = upper_bound,
+    Outlier_Count = length(outliers),
+    Outlier_Percent = length(outliers) / sum(!is.na(x)) * 100
+  )
+}
+
+# Detect outliers for ILINet
+ili_outliers <- bind_rows(lapply(ili_vars, function(v) detect_outliers_iqr(ilinet, v)))
+
+# Detect outliers for Clinical Labs
+clinical_outliers <- bind_rows(lapply(clinical_vars, function(v) detect_outliers_iqr(clinical_labs, v)))
+
+# Display results
+cat("ILINET OUTLIER DETECTION (IQR Method) \n")
+knitr::kable(ili_outliers, digits = 2, row.names = FALSE)
+
+cat("\n CLINICAL LABS OUTLIER DETECTION (IQR Method) \n")
+knitr::kable(clinical_outliers, digits = 2, row.names = FALSE)
+```
+
+- In the ILINet dataset, ilitotal has the highest number of outliers (2,952 records, 9.99%), followed by percent_unweighted_ili (6.86%) and total_patients (5.88%).
+- num_of_providers has fewer outliers (4.04%), while week and year show no outliers because they follow fixed calendar ranges.
+- In the Clinical Labs dataset, total_a (16.01%), total_b (15.91%), and percent_b (14.75%) contain the highest proportion of outliers.
+- total_specimens and percent_positive also show notable outlier percentages, indicating sudden spikes in influenza testing and positivity rates.
+- These extreme values represent severe influenza outbreaks, seasonal surges, or regions with higher healthcare demand rather than data entry errors.
+- Since outbreak spikes are meaningful public health events, removing all outliers may lead to loss of important influenza activity patterns.
+- So instead of deleting them, highly skewed variables can be transformed using log or Box-Cox methods to improve data distribution and model performance.
+
+### VISUALIZE OUTLIERS DISTRIBUTION
+
+ Visualize the outlier distribution for both datasets
+ 
+```{r, warning=FALSE}
+# Visualize outliers for ilinet datset
+ggplot(numeric_ilinet_long,
+  aes(x = Variable,y = Value)) + geom_boxplot(fill = "skyblue") +
+  
+  facet_wrap(~ Variable,scales = "free",ncol = 4) +
+  
+  theme_minimal() + theme(axis.text.x = element_blank()) +
+  
+  labs(title = "Outlier Analysis for ILINet Numeric Variables",x = "Variables",y = "Values")
+
+#Similarly visualize outliers for Clinical Labs dataset
+
+
+ggplot(numeric_clinical_long,
+  aes(x = Variable,y = Value)) + geom_boxplot(fill = "skyblue") +
+  
+  facet_wrap(~ Variable,scales = "free",ncol = 3) +
+  
+  theme_minimal() +theme(axis.text.x = element_blank()) +
+  
+  labs(title = "Outlier Analysis for Clinical Labs Variables",x = "Variables",y = "Values")
+```
+
+### SUMMARY STATISTICS
+
+```{r}
+# View summary statistics for both datasets to understand data quality
+summary(numeric_ilinet) |>knitr::kable()
+summary(numeric_clinical) |>knitr::kable()
+
+```
+
+- In the ILINet dataset, percent_unweighted_ili has a mean of 2.17 and a maximum value of 19.33,showing occasional severe influenza activity spikes.
+- ilitotal and total_patients show very large maximum values (26,030 and 317,409),which shows the presence of highly populated regions or major outbreak periods.
+- The mean values for ilitotal, num_of_providers, and total_patients are higher than their medians, indicating right-skewed distributions and the influence of outliers.
+- In the Clinical Labs dataset, total_specimens, total_a, and total_b also show large maximum values,meaning sudden increases in laboratory testing during outbreak periods.
+- percent_positive has a maximum value of 66.67%, showing that some regions experienced extremely high influenza positivity rates during peak seasons.
+- The variables week and year are evenly distributed because the data spans multiple influenza seasons and calendar weeks.
+- Both datasets contain missing values, particularly in laboratory-related variables,so imputation has to be done before predictive modeling.
+
+
+### IMPUTATION OF MISSING VALUES
+
+- The datasets are sorted by region, year, and week to preserve the natural time-series order of influenza activity before performing imputation.
+- Since influenza activity changes gradually over time within each region, interpolation (na.approx) was used to estimate missing percentage-based variables (percent_unweighted_ili and percent_positive) using nearby weekly observations.
+- Forward fill (na.locf) and backward fill (fromLast = TRUE) were applied to handle missing values at the beginning or end of weekly sequences where interpolation alone could not estimate values.
+- Median imputation was used for ilitotal, total_patients, num_of_providers, total_specimens, total_a, and total_b because the median is less sensitive to extreme outbreak spikes and outliers than the mean.
+- Grouping by region was done within each geographic region, preserving regional influenza patterns and preventing data leakage across locations.
+
+```{r}
+# ILINET IMPUTATION
+
+#Sort by region ,year and weel for ilinet dataset
+ilinet <- ilinet %>% arrange(region,year,week)
+
+# Impute the missing values
+ilinet_clean <- ilinet %>% group_by(region) %>%
+  mutate(
+    percent_unweighted_ili =
+      na.approx(percent_unweighted_ili,na.rm = FALSE,rule = 2),   #forward fill
+    percent_unweighted_ili =
+      na.locf(percent_unweighted_ili,na.rm = FALSE),
+    percent_unweighted_ili =
+      na.locf(percent_unweighted_ili,fromLast = TRUE, na.rm = FALSE),   
+    # Median is robust to outbreak spikes
+    ilitotal =
+      ifelse(is.na(ilitotal),median(ilitotal, na.rm = TRUE),ilitotal),
+    total_patients =
+      ifelse(
+        is.na(total_patients),median(total_patients, na.rm = TRUE),total_patients),
+    num_of_providers =
+      ifelse(is.na(num_of_providers),median(num_of_providers, na.rm = TRUE),
+        num_of_providers)) %>%  ungroup()
+
+# Verify ilinet datset after imputaion
+colSums(is.na(ilinet_clean)) |> kable()
+
+
+# CLINICAL LABS IMPUTATION
+#Similar steps are done for clinical labs dataset
+# Sort data by region ,year and week
+
+clinical_labs <- clinical_labs %>% arrange(region,year,week)
+
+# Impute missing values for clinical labs
+
+clinical_labs_clean <- clinical_labs %>% group_by(region) %>%
+  mutate(
+    percent_positive =na.approx(percent_positive,na.rm = FALSE,rule = 2),
+    percent_positive =na.locf(percent_positive,na.rm = FALSE),
+    percent_positive =na.locf(percent_positive,fromLast = TRUE,na.rm = FALSE),
+    total_specimens =
+      ifelse(is.na(total_specimens),median(total_specimens, na.rm = TRUE),
+        total_specimens),
+    total_a =
+      ifelse(is.na(total_a),median(total_a, na.rm = TRUE),total_a ),
+    total_b =
+      ifelse(
+        is.na(total_b),median(total_b, na.rm = TRUE),total_b)) %>% ungroup()
+
+
+# Verify clinical valyes missing values
+colSums(is.na(clinical_labs_clean)) |> kable()
+
+```
+ 
+ - After interpolation and median imputation, a small number of missing values still remained in both datasets.
+- In the ILINet dataset, 344 missing values remained in percent_unweighted_ili, ilitotal, num_of_providers, and total_patients.
+- In the Clinical Labs dataset, 2,208 missing values still remained in total_specimens, total_a, total_b, and percent_positive, while percent_a and percent_b contained 6,205 missing values.
+- Variables percent_a and percent_b were considered redundant because they are derived from existing laboratory variables 
+- The remaining missing records in clinical laboratory variables will be removed to ensure cleaner and more reliable regression modelling.
+
+```{r}
+# Remove remaining missing values from ilinet dataset
+ilinet_clean <- ilinet_clean %>%
+  drop_na(percent_unweighted_ili,ilitotal,num_of_providers,total_patients)
+
+#Verify remaining missing values in ilinet dataset
+colSums(is.na(ilinet_clean)) |> knitr::kable()
+
+
+# Remove redundant variables in Clinical labs dataset
+clinical_labs_clean <- clinical_labs_clean %>% select(-percent_a,-percent_b)
+
+#Remaining missing records are removed
+clinical_labs_clean <- clinical_labs_clean %>%
+  drop_na(total_specimens,total_a,total_b,percent_positive)
+
+# Verify any missing values left in clinical labs dataset
+colSums(is.na(clinical_labs_clean)) |> knitr::kable()
+
+```
+Output shows the datasets are clean with no missing values.
+
+### MERGING DATASETS
+
+- The ILINet and Clinical Labs datasets were merged using region, year, and week.
+- An inner_join() is used to keep only records that existed in both datasets,so each final observation contained both symptom-based influenza activity data and laboratory-confirmed influenza testing information.
+- An inner join was chosen because predictive modeling requires complete observations across both datasets, and unmatched records could introduce missing values or inconsistent outbreak information.
+
+```{r}
+# Merge datasets using region, year, week.
+# INNER JOIN
+# Keep only matching influenza records
+flu_data <- ilinet_clean %>%
+  inner_join(clinical_labs_clean,
+    by = c("region","year","week"),
+    suffix = c("_ili", "_lab") )
+
+# Verify merged dataset
+head(flu_data[,1:8]) |>knitr::kable()
+str(flu_data)
+dim(flu_data)
+cat("Merged Dataset Records:", nrow(flu_data), "\n")
+```
+- The final merged influenza dataset contains 27,600 records and 11 variables, showing that matching observations were successfully combined from both ILINet and Clinical Labs datasets.
+
+
+
+```
+
+
+
