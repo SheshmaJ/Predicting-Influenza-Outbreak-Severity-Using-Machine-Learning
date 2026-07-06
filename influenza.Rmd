@@ -1,0 +1,1244 @@
+---
+title: "Regional Influenza Outbreak Severity Prediction for Healthcare Planning"
+
+output:
+  pdf_document:
+    toc: false
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+
+**The ILINet and Clinical Labs datasets were downloaded from the CDC FluView surveillance system, which provides weekly influenza monitoring data across the United States. The ILINet dataset contains information about influenza-like illness (ILI) activity reported by healthcare providers, including the percentage of flu-like patient visits, total ILI cases, number of providers, and total patient visits.**
+
+**The Clinical Labs dataset contains laboratory-confirmed influenza testing results, including total specimens tested, confirmed Influenza A and B cases, and positivity percentages. Combining these two datasets helps create a more complete influenza surveillance system by connecting symptom-based flu activity with confirmed laboratory influenza cases for outbreak analysis and prediction.**
+
+## KEY VARIABLES
+
+```{r echo=FALSE, out.width='80%', fig.align='center'}
+
+knitr::include_graphics("keyvariables.PNG")
+```
+
+
+```{r warning=FALSE, message=FALSE}
+# Load required libraries
+library(tidyverse)  #For data manipulation
+library(GGally) #visualization
+library(janitor) #data manipulation
+library(lubridate) #For date handling
+library(corrplot) #visualization
+library(ggplot2) #visualization
+library(scales) ##formatting
+library(knitr) #formatting 
+library(gridExtra) #display plots in grid layout
+library(patchwork) #combine multiple ggplot
+library(zoo) #imputation and interpolation
+library(slider) # Used to help calculate rolling averages
+library(e1071) #to calculate skewness 
+library(dplyr) #data filtering, grouping,summarization
+library(usmap) #create U.S. state maps
+library(sf)#Spatial data processing
+library(psych) #exploring data
+library(tidyr) # Data reshaping
+library(here) #for file paths
+library(randomForest) #for random forest modeling
+library(caret) #Model evaluation and training
+library(xgboost) #for xgboost modeling
+library(viridis) #Color palettes
+#install.packages("xgboost")
+```
+
+
+### IMPORT DATASETS
+```{r}
+# CDC datasets contain an extra descriptive row,
+# therefore we use skip = 1  during import.
+#Reading all columns as character strings to prevent formatting issues
+# Import ILINet dataset
+ilinet <- read_csv(
+  here("FluViewPhase2Data", "ILINet.csv"),
+  skip = 1,
+  col_types = cols(.default = col_character())
+)
+
+clinical_labs <- read_csv(
+  here("FluViewPhase2Data", "ICL_NREVSS_Clinical_Labs.csv"),
+  skip = 1,
+  col_types = cols(.default = col_character())
+)
+```
+
+
+### VERIFY IMPORTS
+
+```{r}
+#view few rows and columns of ilinet dataset
+head(ilinet[,1:7]) |> knitr::kable()
+#view few rows for clinical lab dataset
+head(clinical_labs) |>knitr::kable()
+
+#view dimensions of both datasets
+cat("Dimensions for ilinet dataset is ", dim(ilinet))
+cat("\n Dimensions for clinical labs dataset is",dim(clinical_labs))
+```
+
+Output show 30152 rows, 15 columns for ilinet and 30152 rows and 10 columns and 29808 rows for clinical \_labs.
+
+### VIEW DATATYPES
+
+```{r}
+# inspect structure of both datasets
+str(ilinet) 
+str(clinical_labs) 
+```
+
+From above output we can see all variables are currently stored as character strings which will require numeric conversion for analysis. In CDC influenza datasets, "X" usually means the value was suppressed, missing, or not reported.
+
+### CLEAN COLUMN NAMES
+
+Original column names contain capital letters,spaces,special characters,and periods.So we Standardize names to improves code readability,
+
+```{r}
+# View column names for ilinet
+colnames(ilinet) |>knitr::kable()
+#View column names fr Clinical lab dataset
+colnames(clinical_labs) |>knitr::kable()
+
+#To improve code readability and prevents errors we standardize column names to a consistent format
+#Convert column names into standardized format
+ilinet <- clean_names(ilinet)
+#Verify cleaned column names
+colnames(ilinet) |>knitr::kable()
+#similarly for cilinal labs dataset
+clinical_labs <- clean_names(clinical_labs)
+#Verify cleaned column names
+colnames(clinical_labs) |>knitr::kable()
+
+```
+
+### VIEW DUPLICATES
+
+```{r}
+#calculate duplicate for ilinet
+duplicate_ili <- sum(duplicated(ilinet))
+duplicate_ili
+#calculate duplicate for clinical labs
+duplicate_clinical <- sum(duplicated(clinical_labs))
+duplicate_clinical
+```
+
+No duplicate records exist in either datasets.
+
+### HANDLE SUPPRESSED VALUES X
+
+```{r}
+#"X" usually means the value was suppressed, missing, or not reported.
+#R cannot  analyze "X" as numeric data.
+#Converts CDC suppression values "X" to proper NA values
+ilinet[ilinet == "X"] <- NA
+clinical_labs[clinical_labs == "X"] <- NA
+
+#counts missing data per column
+missing_ilinet <- colSums(is.na(ilinet))
+missing_ilinet |>knitr::kable()
+missing_clinical <- colSums(is.na(clinical_labs))
+missing_clinical |>knitr::kable()
+```
+
+-   The missing value analysis shows that percent_weighted_ili contains 30,141 missing values, meaning almost all records in this variable are unavailable and the column may not be reliable for analysis.
+-   All age-specific variables (age_0_4, age_25_49, age_25_64, age_5_24, age_50_64, and age_65) contain 100% missing values making these variables completely unusable.
+-   The Clinical Labs dataset contains 6,205 missing values.
+-   Since the age-group variables contain no valid observations, these columns should be removed during preprocessing to reduce noise and improve overall data quality for influenza outbreak analysis.
+
+### MISSING VALUES
+
+We can calculate and visualise the missing value using ggplot for both datasets.
+
+```{r}
+# This converts the missing value counts into a dataframe
+missing_df_ili <- data.frame(variable = names(missing_ilinet),missing_count = missing_ilinet)
+## The bar chart helps identify missingness in the ILINet.
+p1 <- ggplot(
+  missing_df_ili,
+  aes(x = reorder(variable, missing_count),y = missing_count)) +
+  geom_bar(stat = "identity",fill = "steelblue" ) + coord_flip() +
+  labs(title = "Missing Value Count in ILINet Dataset",x = "Variables",y = "Missing Count")
+
+#Similarly convert missing values into dataframe for clinical labs dataset
+missing_df_clinical <- data.frame( variable= names(missing_clinical),missing_count =missing_clinical)
+#visualise using barplot
+p2 <- ggplot(missing_df_clinical,
+  aes(x = reorder(variable, missing_count),y = missing_count)) +
+  geom_bar(stat = "identity",fill = "darkgreen") +coord_flip() +
+  labs(title = "Missing Values in Clinical Labs",x = "Variables",y = "Missing Count") 
+
+#visualize both plots
+p1 + p2
+```
+
+### DROP COMPLETELY MISSING COLUMNS
+
+```{r}
+#Columns with entirely missing values are removed
+# Age columns and weighted_ili have 100% missing values so we drop them 
+ilinet <- ilinet %>% 
+  select(-starts_with("age_"), -percent_weighted_ili , -region_type) 
+#similarly drop for clinical labs dataset
+clinical_labs <- clinical_labs %>% select(-region_type )
+
+# Verify columns removed
+colnames(ilinet) |> knitr::kable()
+colnames(clinical_labs) |> knitr::kable()
+```
+
+After dropping columns, the ILINet dataset is reduced from 15 to 7 meaningful variables.
+
+### CONVERT VARIABLES TO NUMERIC
+
+Convert date components, ILI percentages, and count variables to proper numeric types.
+
+```{r}
+#convert numeric variables from character datatype into integer/numeric format.
+ilinet <- ilinet %>%
+  mutate(
+    year = as.integer(year),
+    week = as.integer(week),
+    percent_unweighted_ili = as.numeric(percent_unweighted_ili),
+    ilitotal = as.numeric(ilitotal),
+    num_of_providers = as.numeric(num_of_providers),
+    total_patients = as.numeric(total_patients))
+    
+#similarly for clinical_labs
+clinical_labs <- clinical_labs %>%
+  mutate(
+    year = as.integer(year),
+    week = as.integer(week),
+    total_specimens = as.numeric(total_specimens),
+    total_a = as.numeric(total_a),
+    total_b = as.numeric(total_b),
+    percent_positive = as.numeric(percent_positive),
+    percent_a = as.numeric(percent_a),
+    percent_b = as.numeric(percent_b)
+  )
+#Verify datatype
+sapply(ilinet, class) |>knitr::kable() 
+sapply(clinical_labs, class) |>knitr::kable()
+```
+
+After conversion, approximately 7 variables in ILINet and 8 in clinical labs become numeric.
+
+### **NUMERIC VARIABLE DISTRIBUTIONS**
+
+#### **ILINET DATASET**
+
+-   Distribution of numeric variable for ilinet dataset
+
+```{r, warning=FALSE}
+
+# Create distribution plots for key numeric variables only
+#select numeric variables for ilinet dataset
+numeric_ilinet <- ilinet %>% select(where(is.numeric),-week,-year)
+
+#Convet all numeric columns into one common structure(long format) so ggplot create multiple panels
+numeric_ilinet_long <- numeric_ilinet %>%
+  pivot_longer(cols = everything(),names_to = "Variable",values_to = "Value")
+
+#Create histogram distributions for all numeric variables
+ggplot(numeric_ilinet_long,aes(x = Value)) +
+  
+  geom_histogram(bins = 20,fill ="steelblue",color= "white",alpha = 0.9) +
+  
+  facet_wrap(~ Variable,scales = "free",ncol = 2) +   #creates separate plots for each variable
+  
+  labs(title = "Distribution of Numeric Variables for ILINet",
+    x = "Value",y = "Count") + theme_minimal()
+  
+```
+
+-   Most numeric variables are right-skewed.Variables such as ilitotal, total_patients, total_specimens, total_a, and total_b show strong positive skewness.
+-   percent_unweighted_ili is also positively skewed, indicating that high influenza activity occurs less frequently.
+-   This pattern is expected because most regions experience normal flu activity, while only a few weeks show major outbreak spikes.
+-   week and year appear more uniformly distributed.
+
+#### **CLINICAL LABS DATASET**
+
+-   Distribution of numeric variables for Clinical dataset
+
+```{r,warning=FALSE}
+
+# Create distribution plot for clinical dataset
+#select numeric variables for clinical labs dataset
+numeric_clinical <- clinical_labs %>% select(where(is.numeric), -week, -year)
+
+#Convert all numeric columns into one common structure
+numeric_clinical_long <- numeric_clinical %>%
+  pivot_longer(cols = everything(),names_to = "Variable",values_to = "Value")
+
+#Create histogram distributions for all numeric variables
+ggplot(numeric_clinical_long,aes(x = Value)) +
+  geom_histogram(bins = 15,fill = "steelblue",color = "white",alpha = 0.9) +
+  
+  facet_wrap(~ Variable,scales = "free",ncol = 3) +   #creates separate plots for each variable
+  
+  labs(title = "Distribution for Clinical Labs",
+    x = "Value",y = "Count") + theme_minimal()
+  
+```
+
+-   The Clinical Labs numeric variables are highly right-skewed.Variables such as total_specimens, total_a, and total_b show many low laboratory counts with a small number of very large testing volumes.
+-   percent_positive, percent_a, and percent_b are also positively skewed, indicating that high influenza positivity rates occur less frequently.
+
+### OUTLIER DETECTION
+
+```{r}
+
+# detect outliers using IQR method
+ili_vars <- names(numeric_ilinet)
+clinical_vars <- names(numeric_clinical)
+detect_outliers_iqr <- function(data, var_name) {
+  x <- data[[var_name]]
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  outliers <- which(x < lower_bound | x > upper_bound)
+  
+  data.frame(
+    Variable = var_name,
+    Q1 = Q1,
+    Q3 = Q3,
+    IQR = IQR,
+    Lower_Bound = lower_bound,
+    Upper_Bound = upper_bound,
+    Outlier_Count = length(outliers),
+    Outlier_Percent = length(outliers) / sum(!is.na(x)) * 100
+  )
+}
+
+# Detect outliers for ILINet
+ili_outliers <- bind_rows(lapply(ili_vars, function(v) detect_outliers_iqr(ilinet, v)))
+
+# Detect outliers for Clinical Labs
+clinical_outliers <- bind_rows(lapply(clinical_vars, function(v) detect_outliers_iqr(clinical_labs, v)))
+
+# Display results
+cat("ILINET OUTLIER DETECTION (IQR Method) \n")
+knitr::kable(ili_outliers, digits = 2, row.names = FALSE)
+
+cat("\n CLINICAL LABS OUTLIER DETECTION (IQR Method) \n")
+knitr::kable(clinical_outliers, digits = 2, row.names = FALSE)
+```
+
+-   In the ILINet dataset, ilitotal has the highest number of outliers (2,952 records, 9.99%), followed by percent_unweighted_ili (6.86%) and total_patients (5.88%).
+-   num_of_providers has fewer outliers (4.04%), while week and year show no outliers because they follow fixed calendar ranges.
+-   In the Clinical Labs dataset, total_a (16.01%), total_b (15.91%), and percent_b (14.75%) contain the highest proportion of outliers.
+-   total_specimens and percent_positive also show notable outlier percentages, indicating sudden spikes in influenza testing and positivity rates.
+-   These extreme values represent severe influenza outbreaks, seasonal surges, or regions with higher healthcare demand rather than data entry errors.
+-   Since outbreak spikes are meaningful public health events, removing all outliers may lead to loss of important influenza activity patterns.
+-   So instead of deleting them, highly skewed variables can be transformed using log or Box-Cox methods to improve data distribution and model performance.
+
+### VISUALIZE OUTLIERS DISTRIBUTION
+
+Visualize the outlier distribution for both datasets
+
+```{r, warning=FALSE}
+# Visualize outliers for ilinet datset
+ggplot(numeric_ilinet_long,
+  aes(x = Variable,y = Value)) + geom_boxplot(fill = "skyblue") +
+  
+  facet_wrap(~ Variable,scales = "free",ncol = 4) +
+  
+  theme_minimal() + theme(axis.text.x = element_blank()) +
+  
+  labs(title = "Outlier Analysis for ILINet Numeric Variables",x = "Variables",y = "Values")
+
+#Similarly visualize outliers for Clinical Labs dataset
+
+
+ggplot(numeric_clinical_long,
+  aes(x = Variable,y = Value)) + geom_boxplot(fill = "skyblue") +
+  
+  facet_wrap(~ Variable,scales = "free",ncol = 3) +
+  
+  theme_minimal() +theme(axis.text.x = element_blank()) +
+  
+  labs(title = "Outlier Analysis for Clinical Labs Variables",x = "Variables",y = "Values")
+```
+
+### SUMMARY STATISTICS
+
+```{r}
+# View summary statistics for both datasets to understand data quality
+summary(numeric_ilinet) |>knitr::kable()
+summary(numeric_clinical) |>knitr::kable()
+
+```
+
+-   In the ILINet dataset, percent_unweighted_ili has a mean of 2.17 and a maximum value of 19.33,showing occasional severe influenza activity spikes.
+-   ilitotal and total_patients show very large maximum values (26,030 and 317,409),which shows the presence of highly populated regions or major outbreak periods.
+-   The mean values for ilitotal, num_of_providers, and total_patients are higher than their medians, indicating right-skewed distributions and the influence of outliers.
+-   In the Clinical Labs dataset, total_specimens, total_a, and total_b also show large maximum values,meaning sudden increases in laboratory testing during outbreak periods.
+-   percent_positive has a maximum value of 66.67%, showing that some regions experienced extremely high influenza positivity rates during peak seasons.
+-   The variables week and year are evenly distributed because the data spans multiple influenza seasons and calendar weeks.
+-   Both datasets contain missing values, particularly in laboratory-related variables,so imputation has to be done before predictive modeling.
+
+### IMPUTATION OF MISSING VALUES
+
+-   The datasets are sorted by region, year, and week to preserve the natural time-series order of influenza activity before performing imputation.
+-   Since influenza activity changes gradually over time within each region, interpolation (na.approx) was used to estimate missing percentage-based variables (percent_unweighted_ili and percent_positive) using nearby weekly observations.
+-   Forward fill (na.locf) and backward fill (fromLast = TRUE) were applied to handle missing values at the beginning or end of weekly sequences where interpolation alone could not estimate values.
+-   Median imputation was used for ilitotal, total_patients, num_of_providers, total_specimens, total_a, and total_b because the median is less sensitive to extreme outbreak spikes and outliers than the mean.
+-   Grouping by region was done within each geographic region, preserving regional influenza patterns and preventing data leakage across locations.
+
+```{r}
+# ILINET IMPUTATION
+
+#Sort by region ,year and week  for ilinet dataset
+ilinet <- ilinet %>% arrange(region,year,week)
+
+# Impute the missing values
+ilinet_clean <- ilinet %>% group_by(region) %>%
+  mutate(
+    percent_unweighted_ili =
+      na.approx(percent_unweighted_ili,na.rm = FALSE,rule = 2),   #forward fill
+    percent_unweighted_ili =
+      na.locf(percent_unweighted_ili,na.rm = FALSE),
+    percent_unweighted_ili =
+      na.locf(percent_unweighted_ili,fromLast = TRUE, na.rm = FALSE),   
+    # Median is robust to outbreak spikes
+    ilitotal =
+      ifelse(is.na(ilitotal),median(ilitotal, na.rm = TRUE),ilitotal),
+    total_patients =
+      ifelse(
+        is.na(total_patients),median(total_patients, na.rm = TRUE),total_patients),
+    num_of_providers =
+      ifelse(is.na(num_of_providers),median(num_of_providers, na.rm = TRUE),
+        num_of_providers)) %>%  ungroup()
+
+# Verify ilinet datset after imputaion
+colSums(is.na(ilinet_clean)) |> kable()
+
+
+# CLINICAL LABS IMPUTATION
+#Similar steps are done for clinical labs dataset
+# Sort data by region ,year and week
+
+clinical_labs <- clinical_labs %>% arrange(region,year,week)
+
+# Impute missing values for clinical labs
+
+clinical_labs_clean <- clinical_labs %>% group_by(region) %>%
+  mutate(
+    percent_positive =na.approx(percent_positive,na.rm = FALSE,rule = 2),
+    percent_positive =na.locf(percent_positive,na.rm = FALSE),
+    percent_positive =na.locf(percent_positive,fromLast = TRUE,na.rm = FALSE),
+    total_specimens =
+      ifelse(is.na(total_specimens),median(total_specimens, na.rm = TRUE),
+        total_specimens),
+    total_a =
+      ifelse(is.na(total_a),median(total_a, na.rm = TRUE),total_a ),
+    total_b =
+      ifelse(
+        is.na(total_b),median(total_b, na.rm = TRUE),total_b)) %>% ungroup()
+
+
+# Verify clinical valyes missing values
+colSums(is.na(clinical_labs_clean)) |> kable()
+
+```
+
+-   After interpolation and median imputation, a small number of missing values still remained in both datasets.
+-   In the ILINet dataset, 344 missing values remained in percent_unweighted_ili, ilitotal, num_of_providers, and total_patients.
+-   In the Clinical Labs dataset, 2,208 missing values still remained in total_specimens, total_a, total_b, and percent_positive, while percent_a and percent_b contained 6,205 missing values.
+-   Variables percent_a and percent_b were considered redundant because they are derived from existing laboratory variables
+-   The remaining missing records in clinical laboratory variables will be removed to ensure cleaner and more reliable regression modelling.
+
+```{r}
+# Remove remaining missing values from ilinet dataset
+ilinet_clean <- ilinet_clean %>%
+  drop_na(percent_unweighted_ili,ilitotal,num_of_providers,total_patients)
+
+#Verify remaining missing values in ilinet dataset
+colSums(is.na(ilinet_clean)) |> knitr::kable()
+
+
+# Remove redundant variables in Clinical labs dataset
+clinical_labs_clean <- clinical_labs_clean %>% select(-percent_a,-percent_b)
+
+#Remaining missing records are removed
+clinical_labs_clean <- clinical_labs_clean %>%
+  drop_na(total_specimens,total_a,total_b,percent_positive)
+
+# Verify any missing values left in clinical labs dataset
+colSums(is.na(clinical_labs_clean)) |> knitr::kable()
+
+```
+
+Output shows the datasets are clean with no missing values.
+
+### MERGING DATASETS
+
+-   The ILINet and Clinical Labs datasets were merged using region, year, and week.
+-   An inner_join() is used to keep only records that existed in both datasets,so each final observation contained both symptom-based influenza activity data and laboratory-confirmed influenza testing information.
+-   An inner join was chosen because predictive modeling requires complete observations across both datasets, and unmatched records could introduce missing values or inconsistent outbreak information.
+
+```{r}
+# Merge datasets using region, year, week.
+# INNER JOIN
+# Keep only matching influenza records
+flu_data <- ilinet_clean %>%
+  inner_join(clinical_labs_clean,
+    by = c("region","year","week"),
+    suffix = c("_ili", "_lab") )
+
+# Verify merged dataset
+head(flu_data[,1:8]) |>knitr::kable()
+str(flu_data)
+dim(flu_data)
+cat("Merged Dataset Records:", nrow(flu_data), "\n")
+```
+
+-   The final merged influenza dataset contains 27,600 records and 11 variables, showing that matching observations were successfully combined from both ILINet and Clinical Labs datasets.
+
+```{r}
+summary_table <- describe(
+  flu_data[, c(
+    "percent_positive",
+    "percent_unweighted_ili",
+    "ilitotal",
+    "total_patients",
+    "total_specimens",
+    "total_a",
+    "total_b"
+  )]
+)
+
+knitr::kable(
+  summary_table[, c("n","mean","sd","min","max","skew")],
+  digits = 2,
+  caption = "Summary Statistics of Key Influenza Variables"
+)
+```
+
+```{r}
+# Exporting the merged dataset as a csv file
+write.csv(
+  flu_data,
+  file = here("merged_dataset.csv"),
+  row.names = FALSE
+)
+
+# Variable to count the # of original rows before feature engineering
+original_rows <- nrow(flu_data)
+```
+
+### FEATURE ENGINEERING
+
+Feature engineering was performed to create additional predictors that may help the model better capture patterns in influenza activity. This process included creating future target variables, capturing previous week metrics, rolling averages, changes from week to week, and calculating percentages. Ultimately, the goal of these engineered features are to help improve the model's ability to predict future influenza percent positivity
+
+```{r}
+### Creating a new dataset that will contain the engineered features
+flu_features <- flu_data %>%
+  arrange(region, year, week) %>% # Sorting accordingly to perform rolling calculations
+  group_by(region) %>% # Grouping by region to calculate separately per region
+  
+  mutate(
+    
+    ### 5 columns to predict on
+    # Creating 4 other target variables by pulling the leading week's percent positive
+    target_1wk = lead(percent_positive, 1),
+    target_2wk = lead(percent_positive, 2),
+    target_3wk = lead(percent_positive, 3),
+    target_4wk = lead(percent_positive, 4),
+
+    ### Previous Week's values using the lag function
+    lag1_percent_positive = lag(percent_positive, 1), 
+    lag1_total_specimens = lag(total_specimens, 1),
+    lag1_total_a = lag(total_a, 1),
+    lag1_total_b = lag(total_b, 1),
+    lag1_ili = lag(percent_unweighted_ili, 1),
+
+    ### Calculating 4 week rolling average - structure is as follows:
+    # 1. This means to start at last week's metric
+    # 2. Takes the rolling mean(average)
+    # 3. This then looks at 3 weeks past the last (4 total)
+    # 4. Return N/A if there is not a 4 week history
+    
+    # rolling average for total speciman
+    roll4_total_specimens = slide_dbl(
+      lag(total_specimens), 
+      mean, 
+      .before = 3,
+      .complete = TRUE 
+    ),
+
+    # rolling average for total a
+    roll4_total_a = slide_dbl(
+      lag(total_a),
+      mean,
+      .before = 3,
+      .complete = TRUE
+    ),
+
+    # rolling average for total b
+    roll4_total_b = slide_dbl(
+      lag(total_b),
+      mean,
+      .before = 3,
+      .complete = TRUE
+    ),
+
+    # rolling average for percent unweighted ili
+    roll4_ili = slide_dbl(
+      lag(percent_unweighted_ili),
+      mean,
+      .before = 3,
+      .complete = TRUE
+    ),
+
+    # rolling average for percent positive
+    roll4_percent_positive = slide_dbl(
+      lag(percent_positive),
+      mean,
+      .before = 3,
+      .complete = TRUE
+    ),
+
+    ### Metric Differences
+    specimens_change = total_specimens - lag(total_specimens, 1),
+    total_a_change = total_a - lag(total_a, 1),
+    total_b_change = total_b - lag(total_b, 1),
+    ili_change = percent_unweighted_ili - lag(percent_unweighted_ili, 1),
+    positive_change = percent_positive - lag(percent_positive, 1),
+
+    ### Percentages
+    a_ratio = total_a / total_specimens,
+    b_ratio = total_b / total_specimens,
+    ili_patient_ratio = ilitotal / total_patients,
+
+    ### Week Featuring 
+    # As weeks are cylical vs linear, need to show week 52, is closer to 1 than it is to 45
+    week_sin = sin(2 * pi * week / 52),
+    week_cos = cos(2 * pi * week / 52)
+  ) %>%
+  
+  # Removes region grouping
+  ungroup()
+```
+
+### DATA CLEANING (POST FEATURE ENGINEERING)
+
+After feature engineering, the dataset was evaluated for missing values introduced by the lag features, rolling averages, future target variables, and ratio-based metrics. Missing values associated with the ratio features were further investigated and found to result from observations with zero denominators, producing undefined ratio calculations. Because these observations represented weeks with no recorded specimens or patients, the affected ratio values were imputed with 0. The remaining missing values occurred naturally because observations at the beginning and end of each regional time series did not have sufficient historical or future data to calculate all engineered features. Records containing these remaining missing values were removed to create a complete dataset for predictive modeling. The number and percentage of removed observations were then calculated to assess the impact of the feature engineering process on the final dataset.
+
+```{r}
+# Check missing values after feature engineering
+tibble(
+  Variable = names(flu_features),
+  Missing_Values = colSums(is.na(flu_features))
+) %>%
+  filter(Missing_Values > 0) %>%
+  arrange(desc(Missing_Values))
+
+```
+
+Looking at the table above, many of the missing values can be justified from the fact that they come from the engineered rolling averages and future target columns! Any weeks that don't have the historic or future data will return as null. The fact that they come in multiples of 50 also supports this fact. However, what stood out was the missing values for our ratio columns. We need to explore deeper on why these are showing as null.
+
+```{r}
+# Count # of records with 0 total speciman
+flu_features %>%
+  filter(total_specimens == 0)
+```
+
+The table above explains the reason for the missing values in the engineered a_ratio and b_ratio variables. In all 552 cases, the denominator of the ratio calculation is equal to zero, resulting in a null value. Because these missing values are caused by division by zero rather than missing data, they were imputed with 0 to avoid unnecessarily removing observations from the dataset
+
+```{r}
+flu_features %>%
+  filter(is.na(ili_patient_ratio)) %>%
+  select(region, year, week, ilitotal, total_patients, ili_patient_ratio)
+```
+
+The table above explains the reason for the null values in the engineered ili_patient_ratio variable. Similar to the previous ratio features, the denominator of the calculation is equal to zero, resulting in a null value. This was true for all 9 missing observations. Because these null values were caused by division by zero rather than missing data, they were imputed with 0 to avoid unnecessarily removing observations from the dataset
+
+```{r}
+# Imputing engineered ratio columns with 0
+flu_features <- flu_features %>%
+  mutate(
+    a_ratio = replace_na(a_ratio, 0),
+    b_ratio = replace_na(b_ratio, 0),
+    ili_patient_ratio = replace_na(ili_patient_ratio, 0)
+  )
+
+# Check missing values after imputation
+tibble(
+  Variable = names(flu_features),
+  Missing_Values = colSums(is.na(flu_features))
+) %>%
+  filter(Missing_Values > 0) %>%
+  arrange(desc(Missing_Values))
+```
+
+```{r}
+# Remove rows with missing values
+flu_model_data <- flu_features %>%
+  drop_na()
+
+# Count removed rows
+final_rows <- nrow(flu_model_data)
+rows_removed <- original_rows - final_rows
+
+# Displaying amount of rows removed from feature engineering
+cat("Original rows:", original_rows, "\n")
+cat("Rows after feature engineering cleanup:", final_rows, "\n")
+cat("Rows removed:", rows_removed, "\n")
+cat("Percent removed:", round(rows_removed / original_rows * 100, 2), "%\n")
+```
+
+### EXPLORING ENGINEERED DATASET
+
+```{r}
+# Viewing our engineered dataset
+str(flu_model_data)
+```
+
+### ENGINEERED FEATURE DISTRIBUTIONS
+
+```{r}
+# Future target variables
+future_targets <- flu_model_data %>%
+  select(starts_with("target"))
+
+#Convert all numeric columns into one common structure(long format)so ggplot create multiple panels
+future_targets_long <- future_targets %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+#Create histogram distributions for all numeric variables
+ggplot(future_targets_long, aes(x = Value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.9) +
+  facet_wrap(~ Variable, scales = "free", ncol = 2) +
+  labs(title = "Future Target Variables",
+       x = "Value", y = "Count") +
+  theme_minimal()
+```
+
+```{r}
+# Lagged variables
+lagged_vars <- flu_model_data %>%
+  select(starts_with("lag"))
+
+#Convert all numeric columns into one common structure(long format)so ggplot can create multiple panels
+lagged_vars_long <- lagged_vars %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+# Create histogram distributions for all lagged variables
+ggplot(lagged_vars_long, aes(x = Value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.9) +
+  facet_wrap(~ Variable, scales = "free", ncol = 3) +
+  labs(title = "Lagged Variables",
+       x = "Value", y = "Count") +
+  theme_minimal()
+```
+
+```{r}
+# Rolling average variables
+rolling_vars <- flu_model_data %>%
+  select(starts_with("roll"))
+
+#Convert all numeric columns into one common structure(long format)so ggplot can create multiple panels
+rolling_vars_long <- rolling_vars %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+# Create histogram distributions for all rolling average variables
+ggplot(rolling_vars_long, aes(x = Value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.9) +
+  facet_wrap(~ Variable, scales = "free", ncol = 3) +
+  labs(title = "Rolling Average Variables",
+       x = "Value", y = "Count") +
+  theme_minimal()
+```
+
+```{r,fig.align='center'}
+# Ratio variables
+ratio_vars <- flu_model_data %>%
+  select(contains("ratio"))
+
+#Convert all numeric columns into one common structure (long format)so ggplot can create multiple panels
+ratio_vars_long <- ratio_vars %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+# Create histogram distributions for all ratio variables
+ggplot(ratio_vars_long, aes(x = Value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.9) +
+  facet_wrap(~ Variable, scales = "free", ncol = 1) +
+  labs(title = "Ratio Variables",
+       x = "Value", y = "Count") +
+  theme_minimal()
+```
+
+As we can see, many of the engineered variables remain highly right-skewed. This may pose challenges for certain modeling techniques that are sensitive to predictor distributions. However, several engineered variables, contain negative values, making a Box-Cox transformation unsuitable since it requires strictly positive data. 
+
+## **FEATURE TRANSFORMATION**
+
+**Log Transformation**
+
+```{r}
+## Log transformation for highly skewed count variables
+# Variables transformed using log1p()
+vars <- c("ilitotal","total_patients","total_specimens","total_a","total_b",
+  "lag1_total_specimens","lag1_total_a","lag1_total_b","roll4_total_specimens",
+  "roll4_total_a","roll4_total_b")
+
+# Create log-transformed variables
+for(v in vars) {
+  flu_model_data[[paste0("log_", v)]] <- log1p(flu_model_data[[v]])
+}
+
+# Compare skewness before and after transformation
+skew_comparison <- data.frame(
+  Variable = vars,
+  Before = sapply(
+    vars,
+    function(x) skewness(flu_model_data[[x]], na.rm = TRUE)
+  ),
+  After = sapply(
+    paste0("log_", vars),
+    function(x) skewness(flu_model_data[[x]], na.rm = TRUE)
+  ),
+  row.names = NULL
+)
+knitr::kable( skew_comparison,digits = 3,
+  caption = "Skewness Before and After Log Transformation")
+```
+
+-   The most highly skewed variables included lag1_total_a (13.12), roll4_total_a (12.37), lag1_total_b (10.35), roll4_total_b (9.94), lag1_total_specimens (6.05), and roll4_total_specimens (5.94).
+-   To address this issue, a log transformation using log1p() was applied to the original count variables (ilitotal, total_patients, total_specimens, total_a, total_b) as well as the lagged and rolling average count variables (lag1_total_specimens, lag1_total_a, lag1_total_b, roll4_total_specimens, roll4_total_a, and roll4_total_b).
+-   The transformation helped reduce the impact of extreme values, improve data distribution, and support better regression model performance.
+
+**Categorical Variable transformation**
+
+```{r}
+#Categorical transformation
+flu_model_data$region <- as.factor(flu_model_data$region)
+```
+
+The region variable was converted to a categorical factor to represent geographic locations appropriately during modeling.
+
+## **EXPLORATORY DATA ANALYSIS**
+
+## Correlation Heatmap
+
+**Which variables are most strongly associated with 1-week-ahead influenza positivity (target_1wk)?**
+
+```{r fig.width=8, fig.height=8}
+#Select only numeric variables for correlation analysis
+numeric_data <- flu_model_data %>% select(where(is.numeric)) %>%
+  select(-target_2wk,-target_3wk,-target_4wk)
+
+#Compute correlation matrix
+cor_matrix <- cor(numeric_data,use = "complete.obs")
+
+#plot correlation heatmap
+corrplot(cor_matrix,method = "color",type = "upper",tl.cex = 0.6)
+
+# Correlation of all variables with the target variable
+target_corr <- cor_matrix[, "target_1wk"]
+
+target_corr_df <- tibble(Variable = names(target_corr),Correlation = unname(target_corr))
+
+#sort in ascending order
+target_corr_df <- target_corr_df %>%
+  filter(Variable != "target_1wk") %>%
+  arrange(desc(abs(Correlation)))
+kable(
+  head(target_corr_df, 10),digits = 3,caption = "Top Variables Correlated with Target Variable")
+```
+
+-   The strongest correlations with target were lag1_percent_positive (0.942), a_ratio (0.877), and roll4_percent_positive (0.871). This indicates that previous influenza activity and recent outbreak trends are strongly related to current influenza positivity.
+-   Laboratory testing variables also showed positive correlations with influenza positivity, log_total_a (0.697), log_lag1_total_a (0.678), log_roll4_total_a (0.646), log_total_b (0.590), and log_lag1_total_b (0.553). This suggests that influenza-positive laboratory specimens are useful indicators of outbreak severity.
+-   percent_unweighted_ili (0.539) showed a moderate positive correlation with percent_positive,showing that higher influenza-like illness activity is associated with higher laboratory-confirmed influenza positivity.
+-   The strong correlations of lag1_percent_positive, roll4_percent_positive, and laboratory testing variables support the use of historical surveillance data and engineered features for predicting future influenza activity.
+
+## Influenza Strain Contribution
+
+**Which influenza strain contributes most to outbreaks?**
+
+
+```{r,fig.width=7, fig.height=4,fig.align='center'}
+
+ab_weekly <- flu_model_data %>% group_by(week) %>%
+  summarise(Influenza_A = mean(total_a, na.rm = TRUE),
+    Influenza_B = mean(total_b, na.rm = TRUE)) %>%
+  pivot_longer(cols = c(Influenza_A, Influenza_B),
+    names_to = "strain",values_to = "cases")
+
+# Labels placed near the peaks
+line_labels <- data.frame(
+  week = c(7, 7),cases = c(235, 70),label = c("Influenza A", "Influenza B"))
+
+ggplot(ab_weekly,
+  aes(x = week,y = cases,color = strain,fill = strain )) +
+  geom_area(alpha = 0.15,position = "identity") +geom_line(linewidth = 1.2 ) +
+  geom_text(data = line_labels,aes(x = week, y = cases, label = label),
+    inherit.aes = FALSE,fontface = "bold",size = 4) +
+  scale_x_continuous(breaks = 1:53,limits = c(1, 53)) +
+  labs(title = "Weekly Influenza A and B Activity Patterns",
+    x = "Week",y = "Average Weekly Cases",color = "Strain",fill = "Strain") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 90,size = 7,vjust = 0.5,hjust = 1))
+
+```
+
+-   The chart compares Influenza A and Influenza B activity during the peak outbreak week of each year.
+-   This suggests that Influenza A is the primary driver of annual influenza outbreak peaks.
+
+## Regional Influenza Activity
+
+**Which regions have experienced the highest influenza activity during the past years and may require additional healthcare preparedness?**
+
+```{r,warning=FALSE}
+# Average influenza positivity by state
+map_data <- flu_model_data %>% group_by(region) %>%
+  summarise(avg_positive = mean(percent_positive, na.rm = TRUE),
+    .groups = "drop") %>% rename(full = region)
+
+# US state map
+states_sf <- usmap::us_map(regions = "states") %>% st_as_sf()
+
+# Join influenza data
+label_data <- states_sf %>% left_join(map_data, by = "full")
+
+# Create state centroids for labels
+centroids <- st_centroid(label_data)
+coords <- st_coordinates(centroids)
+
+label_data$x <- coords[,1]
+label_data$y <- coords[,2]
+
+# Map
+ggplot(label_data) + geom_sf(aes(fill = avg_positive),color = "white",linewidth = 0.3) +
+
+  geom_text(aes(x = x,y = y,
+      label = round(avg_positive, 1)),color = "black",size = 2.5,fontface = "bold") +
+
+  scale_fill_distiller(palette = "violet",direction = 1,name = "Average\nPositivity (%)" ) +
+
+  labs(title = "Average Influenza Positivity by State",
+    subtitle = "For All Available Years",
+    caption = "Higher values indicate greater influenza activity") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 11),
+    legend.position = "right",plot.caption = element_text(hjust = 0.5))
+
+# Display Top 10 states with highest influenza positivity
+top_states <- map_data %>% arrange(desc(avg_positive)) %>% slice_head(n = 10)
+
+knitr::kable(top_states,digits = 2,caption = "Top 10 States with Highest Influenza Activity")
+```
+
+-   The map shows that influenza activity varies across states.
+-   Wyoming had the highest average influenza positivity, followed by Louisiana, Nebraska, Idaho, and Texas.
+-   States with higher positivity rates may face greater healthcare demand during influenza seasons.
+-   The geographic variation suggests that influenza activity is not evenly distributed across the United States.
+
+## ILI Activity vs Influenza Positivity
+
+**Do regions with more flu-like illness (ILI) also have higher laboratory-confirmed influenza positivity?**
+
+```{r, fig.align='center',fig.width=6, fig.height=4}
+#divides all observations into three groups based on percent_unweighted_ili
+# Create Low, Medium, and High ILI groups
+flu_model_data <- flu_model_data %>%
+  mutate(ili_group = cut( percent_unweighted_ili, breaks = quantile(percent_unweighted_ili,
+        probs = c(0, 0.33, 0.67, 1),na.rm = TRUE),
+      include.lowest = TRUE,labels = c("Low ILI","Medium ILI","High ILI")))
+
+#Create boxplot to compare influenza positivity
+  ggplot(flu_model_data,
+  aes(ili_group,percent_positive,fill = ili_group)) + geom_boxplot() +theme_minimal() +
+    labs(
+    title = "Relationship Between ILI Activity and Influenza Positivity",
+    x = "ILI Activity Group",y = "Percent Positive") +
+     theme(legend.position = "right",plot.title = element_text(hjust = 0.5))
+```
+
+-   Regions were grouped into Low, Medium, and High flu-like illness (ILI) activity categories based on percent_unweighted_ili.
+-   The boxplot shows influenza positivity for regions reporting flu-like symptoms with Low, Medium, and High ILI activity.
+-   The larger spread in the High ILI group indicates greater variation in influenza positivity during periods of increased flu-like illness activity.
+-   Regions with High ILI activity generally have higher influenza positivity than regions with Low or Medium ILI activity.
+-   This means that when more people report flu-like symptoms, there are usually more laboratory-confirmed influenza cases.
+-   The results show a positive relationship between ILI activity and influenza positivity meaning percent_unweighted_ili is likely to be an important predictor for forecasting future influenza outbreaks.
+
+## Influenza Persistence Analysis
+
+**Does current influenza activity help predict next week's activity?**
+
+```{r,fig.align='center',fig.width=6, fig.height=4}
+
+# Create influenza activity categories based on percent positive
+flu_persistence <- flu_model_data %>%
+  arrange(region, year, week) %>%      # Keep data in time order
+  group_by(region) %>%                 # Calculate within each region
+  mutate(current_level = case_when(percent_positive < 10 ~ "Low",
+                                   percent_positive < 20 ~ "Medium",TRUE ~ "High"),
+    
+    # Next week's influenza activity
+    next_level = lead(current_level)) %>% ungroup()
+
+# Count combinations of current and next week activity
+heat_data <- flu_persistence %>% filter(!is.na(next_level)) %>% 
+  count(current_level, next_level)
+
+# Count combinations of current and next week activity levels
+heat_data$current_level <- factor(heat_data$current_level,levels = c("Low","Medium","High"))
+
+heat_data$next_level <- factor(heat_data$next_level,levels = c("Low","Medium","High"))
+
+# Create heatmap
+heat_data$diag <- heat_data$current_level == heat_data$next_level
+
+ggplot(heat_data, aes(x = current_level, y = next_level)) +
+
+  # Base heatmap
+  geom_tile(aes(fill = n), color = "white") +
+
+  # Darken diagonal cells
+  geom_tile(data = subset(heat_data, diag),fill = "darkblue",alpha = 0.4,color = "white") +
+  geom_text(aes(label = scales::comma(n)), size = 4) +
+  scale_fill_gradient(low = "#D6EAF8",high = "#5DADE2",name = "Count") +
+  labs(title = "Relationship between current and future influenza activity levels",
+    x = "Current Week Activity", y = "Next Week Activity") +
+  theme_minimal() + theme(plot.title = element_text(face = "bold",size=12),
+  axis.title = element_text(face = "bold",size = 10))+ theme(legend.position = "right",
+                                                   plot.title = element_text(hjust = 0.5))
+```
+
+-   There were 20,693 weeks where influenza activity was Low this week and also Low the following week.
+-   There were 1,981 weeks where influenza activity was High this week and remained High next week.
+-   There were 645 weeks where influenza activity was Low this week but increased to Medium next week.
+-   Influenza activity generally changes gradually rather than suddenly.
+-   This indicates that current influenza activity provides useful information about future influenza activity and supports the use of historical influenza measures as predictors in the forecasting model.
+
+## Seasonal Boxplot by Week
+
+**How does influenza positivity vary throughout the year?**
+
+```{r,fig.width=9, fig.height=6}
+# Each box shows the distribution of influenza positivity
+# across all years for that specific week
+ggplot(flu_model_data,
+  aes(factor(week),percent_positive,fill = factor(week) )) +
+  geom_boxplot( alpha = 0.8,outlier.alpha = 0.3) + # Display distribution, median,and outliers
+  scale_fill_viridis_d(option = "turbo" ) +
+  labs(title = "Seasonal Variation in Influenza Positivity",
+    subtitle = "Distribution of Influenza Positivity Across Weeks",
+    x = "Week", y = "Percent Positive") +theme_minimal() +
+  theme(legend.position = "none",plot.title = element_text(face = "bold",size = 14),
+    axis.text.x = element_text(angle = 90,size = 7 ))+ 
+  theme(plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5) )
+```
+
+-   The boxplot shows how influenza positivity changes throughout the year.
+-   Each box represents one calendar week and summarizes influenza positivity across all years in the dataset.
+-   Higher positivity levels are observed during the beginning and end of the year, indicating peak influenza seasons.
+-   Influenza positivity is generally low during the middle weeks of the year.
+-   Several weeks show large variations and extreme values, meaning that influenza outbreaks can vary in severity from year to year.
+-   The results confirm that influenza activity follows a strong seasonal pattern.
+
+
+## **Modeling**
+
+### Feature Selection
+
+```{r}
+# Predictors to remove: total_a, total_b, percent_positive,percent_unweighted_ili, ilitotal,
+# total_a, total_b
+cols_to_remove <- c("total_a", "total_b", "percent_positive", "percent_unweighted_ili", "ilitotal")
+flu_model_data1 <- flu_model_data %>% dplyr::select(-any_of(cols_to_remove))
+#str(flu_model_data1)
+```
+
+The original predictors from which features were engineered were removed given their high correlation with the engineered features. The decision to include or exclude additional variables will be determined based on variable importance after training a baseline model.
+
+### Data Splitting and Resampling Strategies
+
+```{r}
+# Create training and test set data by using the oldest 80% of state-week observations as the training set and the most recent 20% of this data as the test set.
+flu_model_data1 <- flu_model_data1 %>%
+  arrange(year, week)
+
+cutoff <- floor(0.8 * nrow(flu_model_data1))
+
+train_data <- flu_model_data1[1:cutoff, ]
+test_data  <- flu_model_data1[(cutoff + 1):nrow(flu_model_data1), ]
+  
+# Subset the predictors into training and testing.
+# First identify the response variables to remove them from the dataset.
+target_vars <- c("target_1wk", "target_2wk", "target_3wk","target_4wk")
+
+x_train <- train_data %>%
+  dplyr::select(-all_of(target_vars))
+
+x_test <- test_data %>%
+  dplyr::select(-all_of(target_vars))
+
+# Define the response variable as target_1wk since there are four target variables 
+# (i.e. target_1wk, target_2wk, target_3wk, target_4wk).
+y_train <- train_data$target_1wk
+y_test  <- test_data$target_1wk
+
+# Create cross-validation folds 
+indx <- createFolds(y_train, k=5, returnTrain = TRUE) 
+ctrl <- trainControl(method = "cv", index = indx)
+#head(train_data)
+```
+
+To create the training and test sets, instead of a stratified random sample or a simple random sample, a time-ordered sample was taken so that future observations did not leak into the training set given the time-series nature of influenza data. Next, the predictor set was created by removing all four response variables. The target variable, target_1wk was identified. Lastly, cross-validation folds were created where k=5 to reduce computation time.
+
+### Model Training and Tuning
+
+```{r, cache = TRUE, warning=FALSE, results='hide'}
+# Fit the Model
+# Ridge Regression
+dummies <- dummyVars(~ ., data = x_train)
+
+x_train_num <- predict(dummies, newdata = x_train)
+x_test_num  <- predict(dummies, newdata = x_test)
+
+set.seed(1)
+ridgeGrid <- expand.grid(lambda = seq(0.0005, .05, length = 30))
+
+set.seed(1)
+ridgeTune <- train(x = x_train_num,
+                   y = y_train,
+                   method = "ridge",
+                   tuneGrid = ridgeGrid,
+                   trControl = ctrl
+                   )
+
+ridgeTune$bestTune
+plot(ridgeTune)
+
+# Random Forest
+# Specifying single value of mtry.
+rfGrid <- expand.grid(
+  mtry = floor(sqrt(ncol(x_train))))
+
+set.seed(1)
+rfTune <- train(x = x_train,
+                y = y_train,
+                method = "rf",
+                tuneGrid = rfGrid,
+                trControl = ctrl,
+                importance = TRUE,
+                ntree = 100
+                )
+
+# XGBoost
+xgbGrid <- expand.grid(
+  nrounds = c(100, 200),
+  max_depth = c(3, 6),
+  eta = c(0.05, 0.1),
+  gamma = 0,
+  colsample_bytree = 0.8,
+  min_child_weight = 1,
+  subsample = 0.8
+)
+
+set.seed(1)
+
+xgbTune <- train(
+  x = x_train_num,
+  y = y_train,
+  method = "xgbTree",
+  tuneGrid = xgbGrid,
+  trControl = ctrl
+)
+
+xgbTune$bestTune
+plot(xgbTune)
+
+```
+
+For linear model evaluation, Ridge Regression was used due to its ability to handle highly correlated predictors. Random Forest was also chosen for its ability to reduce overfitting and for its high predictive accuracy. Lastly, XGBoost was selected for its ability to prevent overfitting and capture nonlinear relationships in the data.
+
+### Validation, Tuning, and Testing
+
+```{r}
+# Model Evaluation
+train_metrics <- resamples(list(Ridge = ridgeTune, RF = rfTune, XGB = xgbTune))
+summary(train_metrics)
+
+dotplot(train_metrics, metric = "RMSE")
+dotplot(train_metrics, metric = "Rsquared")
+```
+
+```{r}
+# Determine variable importance
+importance1 <- varImp(ridgeTune)
+importance2 <- varImp(rfTune)
+importance3 <- varImp(xgbTune)
+
+ridge_imp <- data.frame(
+  Variable = rownames(importance1$importance),
+  Ridge = importance1$importance$Overall)
+
+rf_imp <- data.frame(
+  Variable = rownames(importance2$importance),
+  RF = importance2$importance$Overall
+)
+
+xgb_imp <- data.frame(
+  Variable = rownames(importance3$importance),
+  XGB = importance3$importance$Overall
+)
+
+importance_table <- ridge_imp %>%
+  full_join(rf_imp, by = "Variable") %>%
+  full_join(xgb_imp, by = "Variable")
+
+importance_table %>%
+  arrange(desc(XGB)) %>%
+  head(10) %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Top 10 Variables by XGBoost Importance"
+  )
+
+xgbImp <- varImp(xgbTune, scale = FALSE)
+plot(xgbImp, top = 10)
+```
+
+```{r}
+# Save the test prediction results in a data frame
+testResults <- data.frame(
+  obs  = y_test,
+  ridgePred = as.numeric(predict(ridgeTune,
+                                    x_test_num)),
+  rfPred = as.numeric(predict(rfTune,
+                              x_test)),
+  xgbPred = as.numeric(predict(xgbTune,
+                               x_test_num))
+)
+
+# Performance metrics on test set
+test_metrics <- rbind(
+  Ridge = postResample(pred = testResults$ridgePred, obs = testResults$obs),
+  RF    = postResample(pred = testResults$rfPred, obs = testResults$obs),
+  XGB   = postResample(pred = testResults$xgbPred, obs = testResults$obs)
+)
+
+test_metrics
+```
+
+```{r}
+# Check for statistical significance in model performance differences
+diff(train_metrics, metric = "RMSE") |> summary()
+```
+
+A check for statistically significant differences in the RMSE values of each of the models reveals that there is a significant difference in RMSE between XGB and Ridge (p-value = 0.00004) and between XGB and RF (p-value = 0.020). The difference in the prediction error between Ridge and RF (p-value = 0.232) was not statistically significant. XGB achieved the lowest RMSE (2.384) and highest R-squared with a value of 0.925, and, as a result, was selected as the preferred model for prediction.
